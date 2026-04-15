@@ -2,6 +2,7 @@
 
 我们选择部分用于评估大型语言模型（LLMs）的知名基准，并提供了主要的LLMs在这些数据集上的详细性能结果。
 
+
 | Model                | Version | Metric                       | Mode | GPT-4-1106 | GPT-4-0409 | Claude-3-Opus | Llama-3-70b-Instruct(lmdeploy) | Mixtral-8x22B-Instruct-v0.1 |
 | -------------------- | ------- | ---------------------------- | ---- | ---------- | ---------- | ------------- | ------------------------------ | --------------------------- |
 | MMLU                 | -       | naive_average                | gen  | 83.6       | 84.2       | 84.6          | 80.5                           | 77.2                        |
@@ -21,3 +22,5 @@
 | MBPP(sanitized)      | 1e1056  | score                        | gen  | 78.6       | 77.0       | 76.7          | 71.6                           | 68.9                        |
 | GPQA_diamond         | 4baadb  | accuracy                     | gen  | 40.4       | 48.5       | 46.5          | 38.9                           | 36.4                        |
 | IFEval               | 3321a3  | Prompt-level-strict-accuracy | gen  | 71.9       | 79.9       | 80.0          | 77.1                           | 65.8                        |
+
+

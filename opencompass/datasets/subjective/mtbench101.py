@@ -1,3 +1,14 @@
+"""MT-Bench-101 数据集实现。
+
+本文件是理解 MT-Bench-101 的核心：
+1. 定义不同任务类型的评审说明 prompt
+2. 从 jsonl 读取多轮对话原始数据
+3. 把一段完整多轮对话拆成“逐轮评测样本”
+4. 为评委模型构造 `system_prompt` 与 `prompt_template`
+
+如果你后续要做多智能体评委，这个文件通常是最先改造的地方之一。
+"""
+
 # flake8: noqa: E501
 import json
 import os.path as osp
@@ -5,14 +16,16 @@ import re
 from typing import Optional
 
 from datasets import Dataset, DatasetDict
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
 from opencompass.registry import LOAD_DATASET
 
 from ..base import BaseDataset
 
+# 这些任务在评测时会跳过第一轮回答，不把第一轮作为待打分对象。
 skip_first_tasks = ['FR', 'CR', 'AR', 'SA', 'SC', 'CM']
 
+# 这些任务在评审时需要额外参考标准答案（reference solution）。
 need_ref_tasks = ['MR', 'GR']
 
 judge = "Please act as an impartial judge follow this instructions: In the following conversations, only the response of the 'assistant' in the last round of conversations is the output of the large language model (AI assistant) that needs to be evaluated.  Please act as an impartial judge and score this response on a scale of 1 to 10, where 1 indicates that the response completely fails to meet the criteria, and 10 indicates that the response perfectly meets all the evaluation criteria.\
@@ -233,13 +246,12 @@ unique_prompt = {
 
 
 def eval_prompt_construct(task, ref_answer, history):
+    """构造原版 MT-Bench-101 单评委 prompt。"""
 
     if task in need_ref_tasks:
         system_prompt = judge + unique_prompt[task] + score_format
-        prompt_template = 'The dialogue need to be judged is: \n *** \n {history} {prediction} \n ***\n\n\
-                    The reference solution is: \n ### \n {ref_answer} \n ###\n\n'.format(
+        prompt_template = 'The dialogue need to be judged is: \n *** \n {history} {prediction} \n ***\n\n                    The reference solution is: \n ### \n {ref_answer} \n ###\n\n'.format(
             history=history, prediction='{prediction}', ref_answer=ref_answer)
-
     else:
         system_prompt = judge + unique_prompt[task] + score_format
         prompt_template = 'The dialogue need to be judged is: \n *** \n {history} {prediction} \n ***'.format(
@@ -248,7 +260,88 @@ def eval_prompt_construct(task, ref_answer, history):
     return system_prompt, prompt_template
 
 
+def persona_prompt_construct(task, ref_answer, history):
+    """构造 MT-Bench-101+ 的 persona judge prompt。"""
+    system_prompt = judge + unique_prompt[task] + score_format
+    base_prompt = (
+        "You are a member of the {judge_panel_name}.\n"
+        "Your user-perspective persona is: {persona_name}.\n"
+        "Persona description: {persona_description}\n"
+        "Focus especially on: {persona_focus}\n\n"
+        "You must still follow the original MT-Bench-101 task-specific criteria above. "
+        "Your persona only changes emphasis, not the official scoring standard.\n\n"
+        "The dialogue need to be judged is: \n***\n{history} {prediction}\n***\n\n"
+    )
+    if task in need_ref_tasks:
+        base_prompt += (
+            "The reference solution is: \n###\n{ref_answer}\n###\n\n"
+        )
+    base_prompt += (
+        "Please output strictly in the following format:\n"
+        "{persona_output_format}"
+    )
+    prompt_template = base_prompt.format(
+        history=history,
+        prediction='{prediction}',
+        ref_answer=ref_answer,
+        persona_output_format='{persona_output_format}',
+        judge_panel_name='{judge_panel_name}',
+        persona_name='{persona_name}',
+        persona_description='{persona_description}',
+        persona_focus='{persona_focus}',
+    )
+    return system_prompt, prompt_template
+
+
+def meta_prompt_construct(task, ref_answer, history, judge_count=3):
+    """构造 MT-Bench-101+ 的元评委 prompt。"""
+    system_prompt = (
+        "You are the meta-judge of the {judge_panel_name}.\n"
+        "You will receive one candidate response and opinions from multiple persona judges.\n"
+        "Your job is to synthesize the evidence under the official MT-Bench-101 task-specific criteria, "
+        "identify the main consensus and disagreement, and then give one final fair score.\n"
+        "Do not answer the user directly. Do not rewrite the candidate response. "
+        "Do not mechanically average the judge scores.\n"
+        "You must output strictly in the required final format and end with 'Final Rating: [[score]]'."
+    )
+    base_prompt = (
+        "Official MT-Bench-101 task-specific evaluation criteria:\n"
+        "{task_specific_criteria}\n\n"
+        "The dialogue need to be judged is: \n***\n{history} {prediction}\n***\n\n"
+    )
+    if task in need_ref_tasks:
+        base_prompt += (
+            "The reference solution is: \n###\n{ref_answer}\n###\n\n"
+        )
+    for idx in range(1, judge_count + 1):
+        base_prompt += (
+            f"Opinion from judge {idx} ({{judge_model{idx}}}):\n"
+            f"{{judgement{'' if idx == 1 else idx}}}\n\n"
+        )
+    base_prompt += (
+        "Please output strictly in the following format:\n"
+        "{final_output_format}"
+    )
+    prompt_template = base_prompt.format(
+        task_specific_criteria=unique_prompt[task],
+        history=history,
+        prediction='{prediction}',
+        ref_answer=ref_answer,
+        final_output_format='{final_output_format}',
+        judge_panel_name='{judge_panel_name}',
+        judgement='{judgement}',
+        judgement2='{judgement2}',
+        judgement3='{judgement3}',
+        judge_model1='{judge_model1}',
+        judge_model2='{judge_model2}',
+        judge_model3='{judge_model3}',
+    )
+    system_prompt = system_prompt.format(judge_panel_name='{judge_panel_name}')
+    return system_prompt, prompt_template
+
+
 def add_format(question, answer):
+    """把一轮问答转换成 OpenCompass 常用的 chat message 结构。"""
     history = [dict(role='user', content=question)]
     if answer:
         history += [dict(role='assistant', content=answer)]
@@ -258,7 +351,16 @@ def add_format(question, answer):
 @LOAD_DATASET.register_module()
 class MTBench101Dataset(BaseDataset):
 
-    def load(self, path: str, name: str):
+    def load(self, path: str, name: str, prompt_mode: str = 'single', judge_count: int = 3):
+        """读取原始 jsonl，并把每段多轮对话切成多个“待评分回合”。
+
+        每个输出样本都对应某个 `multi_id` 下的某一个 `turn_id`，
+        样本中会同时保存：
+        - 被评模型看到的 `dialogue`
+        - 评委模型看到的 `system_prompt`
+        - 评委模型看到的 `prompt_template`
+        - 用于结果聚合的 `judge` 元信息
+        """
         import copy
 
         filename = osp.join(path, f'{name}.jsonl')
@@ -273,6 +375,7 @@ class MTBench101Dataset(BaseDataset):
             conversations.append(line)
 
         for dialogue in conversations:
+            # `multi_id` 标识一整段多轮对话；`task` 标识这段对话主要考察的能力。
             multi_id = dialogue['id']
             task = dialogue['task']
             if task in skip_first_tasks:
@@ -285,6 +388,7 @@ class MTBench101Dataset(BaseDataset):
             history = ''
             dia_list = []
             for turn_index, turn in enumerate(dialogue['history']):
+                # 每次循环处理对话中的一轮 user/bot 交互。
                 human = turn['user']
                 assistant = turn['bot']
                 turn_id = str(turn_index + 1)
@@ -296,6 +400,7 @@ class MTBench101Dataset(BaseDataset):
                 current_multi_id = multi_id
 
                 if skip_first and turn_index == 0:
+                    # 某些任务把第一轮视作上下文示例，因此只缓存，不立刻作为待评测样本输出。
                     pre_dia = add_format(question=human, answer=assistant)
                     history = '\n\n Human: ' + human + '\n\nAssistant: ' + assistant
                     continue
@@ -305,10 +410,22 @@ class MTBench101Dataset(BaseDataset):
 
                 pre_dia_copy = copy.deepcopy(pre_dia)
 
-                system_prompt, prompt_template = eval_prompt_construct(
-                    task, pre_dia, history)
+                if prompt_mode == 'single':
+                    system_prompt, prompt_template = eval_prompt_construct(
+                        task, pre_dia, history)
+
+                elif prompt_mode == 'persona':
+                    system_prompt, prompt_template = persona_prompt_construct(
+                        task, pre_dia, history)
+                elif prompt_mode == 'meta':
+                    system_prompt, prompt_template = meta_prompt_construct(
+                        task, pre_dia, history, judge_count=judge_count)
+                else:
+                    raise ValueError(f'Unsupported prompt_mode: {prompt_mode}')
 
                 raw_data.append({
+                    # `dialogue` 会在推理阶段喂给被评模型；
+                    # `system_prompt/prompt_template` 会在评审阶段喂给评委模型。
                     'dialogue': pre_dia_copy,
                     'task': task,
                     'multi_id': current_multi_id,

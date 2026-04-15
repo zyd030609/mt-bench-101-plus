@@ -18,6 +18,24 @@ PromptType = Union[PromptList, str]
 OPENAI_API_BASE = 'https://api.openai.com/v1/chat/completions'
 
 
+def _candidate_env_keys(openai_api_base: str, path: str) -> List[str]:
+    """Infer candidate API-key environment variables for common providers."""
+    candidates = ['OPENAI_API_KEY']
+    base = (openai_api_base or '').lower()
+    model_path = (path or '').lower()
+
+    if 'deepseek' in base or 'deepseek' in model_path:
+        candidates.insert(0, 'DEEPSEEK_API_KEY')
+    if 'bigmodel' in base or 'glm' in model_path or 'zhipu' in base:
+        candidates.insert(0, 'ZHIPUAI_API_KEY')
+
+    deduped = []
+    for name in candidates:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped
+
+
 @MODELS.register_module()
 class OpenAI(BaseAPIModel):
     """Model wrapper around OpenAI's models.
@@ -85,13 +103,24 @@ class OpenAI(BaseAPIModel):
 
         if isinstance(key, str):
             if key == 'ENV':
-                if 'OPENAI_API_KEY' not in os.environ:
-                    raise ValueError('OpenAI API key is not set.')
-                self.keys = os.getenv('OPENAI_API_KEY').split(',')
+                env_keys = _candidate_env_keys(openai_api_base, path)
+                env_value = None
+                env_name = None
+                for candidate in env_keys:
+                    if candidate in os.environ:
+                        env_name = candidate
+                        env_value = os.getenv(candidate)
+                        break
+                if not env_value:
+                    raise ValueError('OpenAI API key is not set. Tried: ' + ', '.join(env_keys))
+                self.keys = env_value.split(',')
+                self.key_env = env_name
             else:
                 self.keys = [key]
+                self.key_env = None
         else:
             self.keys = key
+            self.key_env = None
 
         # record invalid keys and skip them when requesting API
         # - keys have insufficient_quota
@@ -245,8 +274,7 @@ class OpenAI(BaseAPIModel):
             try:
                 response = raw_response.json()
             except requests.JSONDecodeError:
-                self.logger.error('JsonDecode error, got',
-                                  str(raw_response.content))
+                self.logger.error(f'JsonDecode error, got {raw_response.content}')
                 continue
             self.logger.debug(str(response))
             try:
@@ -255,21 +283,27 @@ class OpenAI(BaseAPIModel):
                 else:
                     return response['choices'][0]['message']['content'].strip()
             except KeyError:
-                if 'error' in response:
-                    if response['error']['code'] == 'rate_limit_exceeded':
+                error = response.get('error')
+                if error:
+                    error_code = str(error.get('code', ''))
+                    if error_code == 'rate_limit_exceeded':
                         time.sleep(10)
-                        self.logger.warn('Rate limit exceeded, retrying...')
+                        self.logger.warning('Rate limit exceeded, retrying...')
                         continue
-                    elif response['error']['code'] == 'insufficient_quota':
+                    elif error_code == 'insufficient_quota':
                         self.invalid_keys.add(key)
-                        self.logger.warn(f'insufficient_quota key: {key}')
+                        self.logger.warning(f'insufficient_quota key: {key}')
                         continue
-                    elif response['error']['code'] == 'invalid_prompt':
-                        self.logger.warn('Invalid prompt:', str(input))
+                    elif error_code == 'invalid_prompt':
+                        self.logger.warning(f'Invalid prompt: {input}')
+                        return ''
+                    elif error_code == '1301':
+                        self.logger.warning(f'Provider blocked prompt/content: {error}')
                         return ''
 
-                    self.logger.error('Find error message in response: ',
-                                      str(response['error']))
+                    self.logger.error(f'Find error message in response: {error}')
+                else:
+                    self.logger.error(f'Unexpected API response: {response}')
             max_num_retries += 1
 
         raise RuntimeError('Calling OpenAI failed after retrying for '

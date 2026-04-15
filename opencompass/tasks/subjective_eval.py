@@ -1,9 +1,15 @@
 # flake8: noqa: E501
+"""主观评测任务执行器。
+
+本文件负责把“被评模型输出”转成“评委模型输入”，并将评委打分结果写回
+`results/`。它也是后续改造成多评委 / 元评委 / 多智能体评委的核心入口之一。
+"""
 import argparse
 import copy
 import fnmatch
 import os.path as osp
 import random
+import sys
 import time
 from typing import List, Optional, Union
 
@@ -21,13 +27,12 @@ from opencompass.utils import (build_dataset_from_cfg, dataset_abbr_from_cfg,
 
 
 class SubjectiveEvalTask(BaseTask):
-    """Subjective Evaluation Task.
+    """主观评测任务执行器。
 
-    This task is used to evaluate the metric between predictions and
-    references.
-
-    Args:
-        cfg (ConfigDict): The configuration of the entire evaluation task.
+    你可以把它理解成“评测阶段总调度器”：
+    - 上游：读取 infer 阶段生成的模型回答
+    - 中游：拼出 judge 需要看到的输入
+    - 下游：调用 `LMEvaluator` 写出评分结果
     """
 
     name_prefix = 'SubjectiveEval'
@@ -35,8 +40,12 @@ class SubjectiveEvalTask(BaseTask):
     output_subdir = 'results'
 
     def __init__(self, cfg: ConfigDict):
+        # 初始化阶段会判断当前任务是“普通 judge 打分”还是“meta judge 汇总”。
         super().__init__(cfg)
         self.logger = get_logger()
+        # `judge_cfg`：普通单阶段评委配置。
+        # `meta_judge_cfg`：第二阶段元评委配置。
+        # `judge_models`：第一阶段的多个评委模型列表。
         judge_cfg = cfg.get('judge_model', None)
         meta_judge_cfg = cfg.get('meta_judge_model', None)
         judge_models = cfg.get('judge_models', None)
@@ -73,11 +82,13 @@ class SubjectiveEvalTask(BaseTask):
                        f'--nproc_per_node {self.num_procs} '
                        f'{script_path} {cfg_path}')
         else:
-            command = f'python {script_path} {cfg_path}'
+            python = sys.executable
+            command = f'{python} {script_path} {cfg_path}'
 
         return template.format(task_cmd=command)
 
     def run(self):
+        # 逐个模型、逐个数据集执行主观评测；如果结果文件已存在则直接跳过。
         # model_cfg can be a list of model configs
         for model_cfg, dataset_cfgs in zip(self.model_cfgs, self.dataset_cfgs):
             for dataset_cfg in dataset_cfgs:
@@ -94,6 +105,12 @@ class SubjectiveEvalTask(BaseTask):
                 self._score(model_cfg, dataset_cfg, eval_cfg, output_column,
                             self.meta)
 
+    def _parse_test_range(self, test_range: str):
+        parts = test_range.strip('[]').split(':')
+        start = int(parts[0]) if parts[0] else 0
+        end = int(parts[1]) if len(parts) > 1 and parts[1] else None
+        return start, end
+
     def _load_model_pred(
         self,
         model_cfg: Union[ConfigDict, List[ConfigDict]],
@@ -102,6 +119,7 @@ class SubjectiveEvalTask(BaseTask):
         given_preds: List[dict],
     ) -> Union[None, List[str]]:
         if isinstance(model_cfg, (tuple, list)):
+            # 如果传入的是多个模型配置，就递归读取每个模型的 predictions。
             return [
                 self._load_model_pred(m, dataset_cfg, eval_cfg, given_preds)
                 for m in model_cfg
@@ -120,15 +138,13 @@ class SubjectiveEvalTask(BaseTask):
         if 'test_range' in dataset_cfg['reader_cfg']:
             filename = get_infer_output_path(
                 model_cfg, dataset_cfg, osp.join(self.work_dir, 'predictions'))
-            root, ext = osp.splitext(filename)
-            last_underscore_index = root.rfind('_')
-            root = root[:last_underscore_index]
-            filename = root + ext
         # If take SubjectNaivePartition, get filename
         else:
             filename = get_infer_output_path(
                 model_cfg, dataset_cfg, osp.join(self.work_dir, 'predictions'))
         for given_pred in given_preds:
+            # `given_pred` 允许用户指定“不要从当前 work_dir 读 predictions，
+            # 而是从外部目录复用已有结果”。
             abbr = given_pred['abbr']
             path = given_pred['path']
             if abbr == model_cfg['abbr']:
@@ -165,7 +181,10 @@ class SubjectiveEvalTask(BaseTask):
         # If take SubjectSizePartition, get new pred_strs based on test_range
         if 'test_range' in dataset_cfg['reader_cfg']:
             test_range = dataset_cfg['reader_cfg']['test_range']
-            pred_strs = eval('pred_strs' + test_range)
+            start, end = self._parse_test_range(test_range)
+            expected_len = (end - start) if end is not None else None
+            if expected_len is not None and len(pred_strs) > expected_len:
+                pred_strs = pred_strs[start:end]
         # If take SubjectNaivePartition, get all pred_strs
         else:
             pred_strs = pred_strs
@@ -232,10 +251,6 @@ class SubjectiveEvalTask(BaseTask):
             filename = get_infer_output_path(
                 deal_with_judge_model_abbr([m for m in model_cfg], judge_cfg),
                 dataset_cfg, osp.join(self.work_dir, 'results'))
-            root, ext = osp.splitext(filename)
-            last_underscore_index = root.rfind('_')
-            root = root[:last_underscore_index]
-            filename = root + ext
         # If take SubjectNaivePartition, get filename
         else:
             filename = get_infer_output_path(
@@ -272,31 +287,22 @@ class SubjectiveEvalTask(BaseTask):
         # If take SubjectSizePartition, get new pred_strs based on test_range
         if 'test_range' in dataset_cfg['reader_cfg']:
             test_range = dataset_cfg['reader_cfg']['test_range']
+            start, end = self._parse_test_range(test_range)
             if self.infer_order == 'double':
                 # When set infer_order as double, we need to select the judgements to meet the predctions which will be doubled later
-                start = 0
-                end = None
                 pred_strs_length = len(pred_strs)
-                # Split the string by the ':', the test_range is a string shapes like '[0:15]'
-                parts = test_range.strip('[]').split(':')
-                # Check if the start index is provided
-                if parts[0]:
-                    start = int(parts[0])
-                # Check if the end index is provided
-                if len(parts) > 1 and parts[1]:
-                    end = int(parts[1])
-                else:
-                    # If the end is not provided, determine the default end based on the length of 'pred_strs'
+                if end is None:
                     end = int(pred_strs_length / 2)
                 assert pred_strs_length % 2 == 0, "Since you have set the infer_order as 'double', the length of 'pred_strs' must be even."
                 assert end <= pred_strs_length / 2, "The 'end' value must not exceed half of the 'pred_strs' length."
                 # Reset the newly start and end
                 start *= 2
                 end *= 2
-                pred_strs = eval('pred_strs[' + str(start) + ':' + str(end) +
-                                 ']')
+                pred_strs = pred_strs[start:end]
             else:
-                pred_strs = eval('pred_strs' + test_range)
+                expected_len = (end - start) if end is not None else None
+                if expected_len is not None and len(pred_strs) > expected_len:
+                    pred_strs = pred_strs[start:end]
         # If take SubjectNaivePartition, get all pred_strs
         else:
             pred_strs = pred_strs
@@ -353,6 +359,7 @@ class SubjectiveEvalTask(BaseTask):
             deal_with_judge_model_abbr(model_cfg, self.judge_cfg, self.meta),
             dataset_cfg, osp.join(self.work_dir, 'results'))
         if meta:
+            # meta 模式：除了被评模型回答外，还要额外读取多个 judge 的历史评语。
             model_preds = self._load_model_pred(model_cfg, dataset_cfg,
                                                 eval_cfg, self.given_pred)
             model_judges = self._load_model_judgements(model_cfg, dataset_cfg,
@@ -365,6 +372,7 @@ class SubjectiveEvalTask(BaseTask):
         if not self.judge_cfg:
             raise ValueError('missing "eval.judge_cfg"')
         eval_cfg['evaluator']['judge_cfg'] = self.judge_cfg
+        # 把运行时才知道的内容动态塞回 evaluator 配置中。
         eval_cfg['evaluator']['dataset_cfg'] = dataset_cfg
         eval_cfg['evaluator']['output_path'] = out_path
         icl_evaluator = ICL_EVALUATORS.build(eval_cfg['evaluator'])
