@@ -85,7 +85,8 @@ class OpenAI(BaseAPIModel):
                  mode: str = 'none',
                  logprobs: Optional[bool] = False,
                  top_logprobs: Optional[int] = None,
-                 temperature: Optional[float] = None):
+                 temperature: Optional[float] = None,
+                 extra_body: Optional[Dict] = None):
 
         super().__init__(path=path,
                          max_seq_len=max_seq_len,
@@ -96,6 +97,7 @@ class OpenAI(BaseAPIModel):
         import tiktoken
         self.tiktoken = tiktoken
         self.temperature = temperature
+        self.extra_body = extra_body or {}
         assert mode in ['none', 'front', 'mid', 'rear']
         self.mode = mode
         self.logprobs = logprobs
@@ -265,6 +267,8 @@ class OpenAI(BaseAPIModel):
                     stop=None,
                     temperature=temperature,
                 )
+                if self.extra_body:
+                    data.update(self.extra_body)
                 raw_response = requests.post(self.url,
                                              headers=header,
                                              data=json.dumps(data))
