@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-ROOT = Path(r'd:\WORKS\综合课设+毕设\opencompass')
+ROOT = Path(__file__).resolve().parents[1]
 CFG_DIR = ROOT / 'configs' / 'mtbench101_plus_task13x30'
 CFG_DIR.mkdir(parents=True, exist_ok=True)
 

@@ -48,24 +48,43 @@
 
 ## 4. 运行方式
 ### 4.1 首次完整运行
-在项目根目录执行：
+在项目根目录执行。
+
+如果当前已经进入正确的 Python/Conda 环境，可直接使用：
 
 ```powershell
-& "D:\Anaconda\envs\opencompass310\python.exe" "tools/run_mtbench101_task13x30_single_model.py" --mode all --max-parallel 13
+python tools/run_mtbench101_task13x30_single_model.py --mode all --max-parallel 13
 ```
 
 如果想更稳妥地先测试，可把并行度调低：
 
 ```powershell
-& "D:\Anaconda\envs\opencompass310\python.exe" "tools/run_mtbench101_task13x30_single_model.py" --mode all --max-parallel 3
+python tools/run_mtbench101_task13x30_single_model.py --mode all --max-parallel 3
 ```
+
+如果系统里有多个 Python，也可以把 `python` 替换为你当前环境对应的解释器路径。
 
 ### 4.2 仅补跑评测阶段
 如果 infer 已完成，只补跑 eval：
 
 ```powershell
-& "D:\Anaconda\envs\opencompass310\python.exe" "tools/run_mtbench101_task13x30_single_model.py" --mode eval --max-parallel 13 --reuse <timestamp>
+python tools/run_mtbench101_task13x30_single_model.py --mode eval --max-parallel 13 --reuse <timestamp>
 ```
+
+### 4.3 单任务 smoke test
+如果只想先测试一个任务，例如 `AR`：
+
+```powershell
+python tools/run_mtbench101_task13x30_single_model.py --mode infer --tasks AR --max-parallel 1
+```
+
+若 infer 成功，再复用该任务真实实验时间戳补跑 eval：
+
+```powershell
+python tools/run_mtbench101_task13x30_single_model.py --mode eval --tasks AR --max-parallel 1 --reuse <timestamp>
+```
+
+说明：`--reuse` 应填写该任务真实实验目录时间戳，而不是 `_run_summaries` 下的汇总时间戳。
 
 ## 5. 结果输出位置
 ### 5.1 各任务输出目录
@@ -95,3 +114,4 @@
 1. 当前 key 以明文形式写入项目文件，仅适合本地实验与迁移使用。
 2. 如需提交仓库或分享给他人，务必先脱敏。
 3. 如果后续需要更换待测模型或 key，只需修改 `tools/generate_mtbench101_task13x30_templates.py`，然后重新生成配置文件。
+4. 当前脚本已去除项目根目录的本机绝对路径依赖，可根据脚本文件位置自动定位仓库根目录。

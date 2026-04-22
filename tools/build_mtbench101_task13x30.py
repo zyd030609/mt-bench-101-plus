@@ -2,7 +2,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-ROOT = Path(r'd:\WORKS\综合课设+毕设\opencompass')
+ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'data' / 'subjective' / 'mtbench101.jsonl'
 OUT = ROOT / 'data' / 'subjective' / 'mtbench101_task13x30.jsonl'
 OUT_DIR = ROOT / 'data' / 'subjective' / 'mtbench101_task13x30_by_task'

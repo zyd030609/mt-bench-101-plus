@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-ROOT_DIR = Path(r'd:\WORKS\综合课设+毕设\opencompass')
+ROOT_DIR = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT_DIR / 'configs' / 'mtbench101_plus_task13x30'
 SUMMARY_DIR = ROOT_DIR / 'outputs' / 'mtbench101_plus_task13x30' / '_run_summaries'
 TARGET_MODEL_ABBR = 'glm-4_6v-flashx'
