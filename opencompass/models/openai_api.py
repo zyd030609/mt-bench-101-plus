@@ -1,8 +1,11 @@
 import json
 import os
 import re
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from pathlib import Path
 from threading import Lock
 from typing import Dict, List, Optional, Union
 
@@ -16,6 +19,28 @@ from .base_api import BaseAPIModel
 
 PromptType = Union[PromptList, str]
 OPENAI_API_BASE = 'https://api.openai.com/v1/chat/completions'
+API_POST_CALL_INTERVAL_SECONDS = 1.0
+API_POST_CALL_LOCK_PATH = Path(tempfile.gettempdir()) / 'opencompass_openai_api_post_call.lock'
+
+
+@contextmanager
+def _api_post_call_lock():
+    if os.name == 'nt':
+        import msvcrt
+        with open(API_POST_CALL_LOCK_PATH, 'a+b') as lock_file:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        with open(API_POST_CALL_LOCK_PATH, 'a+b') as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _candidate_env_keys(openai_api_base: str, path: str) -> List[str]:
@@ -269,9 +294,13 @@ class OpenAI(BaseAPIModel):
                 )
                 if self.extra_body:
                     data.update(self.extra_body)
-                raw_response = requests.post(self.url,
-                                             headers=header,
-                                             data=json.dumps(data))
+                with _api_post_call_lock():
+                    try:
+                        raw_response = requests.post(self.url,
+                                                     headers=header,
+                                                     data=json.dumps(data))
+                    finally:
+                        time.sleep(API_POST_CALL_INTERVAL_SECONDS)
             except requests.ConnectionError:
                 self.logger.error('Got connection error, retrying...')
                 continue
@@ -290,7 +319,7 @@ class OpenAI(BaseAPIModel):
                 error = response.get('error')
                 if error:
                     error_code = str(error.get('code', ''))
-                    if error_code == 'rate_limit_exceeded':
+                    if error_code in {'rate_limit_exceeded', '1302'}:
                         time.sleep(10)
                         self.logger.warning('Rate limit exceeded, retrying...')
                         continue
